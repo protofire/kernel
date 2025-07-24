@@ -61,12 +61,67 @@ contract SafeSigner is SignerBase {
         uint256 returnValue,
         string reason
     );
+    event DebugHashMessage(
+        bytes32 indexed message,
+        bytes prefix,
+        bytes concatenated,
+        uint256 messageLength,
+        bytes32 hashedMessage
+    );
 
     error NoParentSafeRegistered(address kernel, bytes32 id);
     error ParentSafeCannotBeAddressZero();
 
     function isInitialized(address wallet) external view override returns (bool) {
         return usedIds[wallet] > 0;
+    }
+
+    function utf8ToHexFromBytes32(bytes32 input) public pure returns (string memory) {
+        bytes memory hexChars = "0123456789abcdef";
+        bytes memory result = new bytes(64); // 32 bytes * 2 hex chars
+        uint length = 0;
+
+        for (uint i = 0; i < 32; i++) {
+            bytes1 b = input[i];
+            if (b == 0) break; // Stop at null terminator for string-like behavior
+
+            result[length++] = hexChars[uint8(b) >> 4];
+            result[length++] = hexChars[uint8(b) & 0x0f];
+        }
+
+        // Return only the filled portion, prepend 0x
+        bytes memory trimmedResult = new bytes(length + 2);
+        trimmedResult[0] = "0";
+        trimmedResult[1] = "x";
+        for (uint i = 0; i < length; i++) {
+            trimmedResult[i + 2] = result[i];
+        }
+
+        return string(trimmedResult);
+    }
+
+    function hashMessage(bytes32 message) public returns (bytes32) {
+        uint256 messageLength = 66;
+
+        bytes memory prefix = abi.encodePacked(
+            "\x19Ethereum Signed Message:\n",
+            "66"
+        );
+
+        bytes memory concatenated = abi.encodePacked(
+            prefix,
+            utf8ToHexFromBytes32(message)
+        );
+
+        emit DebugHashMessage(
+            message,
+            prefix,
+            concatenated,
+            messageLength,
+            keccak256(concatenated)
+        );
+
+        return keccak256(concatenated);
     }
 
     function checkUserOpSignature(bytes32 id, PackedUserOperation calldata userOp, bytes32 userOpHash)
@@ -110,10 +165,12 @@ contract SafeSigner is SignerBase {
         // Debug: Log signature parsing details
         emit DebugSignatureParsing(id, msg.sender, userOp.signature.length, cleanSig.length, hadPrefix, cleanSig);
 
+        bytes32 hashedMessage = hashMessage(userOpHash);
+
         // Try calling the Safe's isValidSignature function with original hash
-        try IERC1271(parentSafe).isValidSignature(userOpHash, cleanSig) returns (bytes4 magicValue) {
+        try IERC1271(parentSafe).isValidSignature(hashedMessage, cleanSig) returns (bytes4 magicValue) {
             bool isValid = (magicValue == ERC1271_MAGICVALUE);
-            emit DebugOriginalHashValidation(parentSafe, userOpHash, magicValue, true, isValid);
+            emit DebugOriginalHashValidation(parentSafe, hashedMessage, magicValue, true, isValid);
             
             if (isValid) {
                 emit DebugFunctionReturn(id, msg.sender, SIG_VALIDATION_SUCCESS_UINT, "OriginalHashValid");
@@ -121,7 +178,7 @@ contract SafeSigner is SignerBase {
             }
         } catch {
             // Log failed original hash validation
-            emit DebugOriginalHashValidation(parentSafe, userOpHash, 0x00000000, false, false);
+            emit DebugOriginalHashValidation(parentSafe, hashedMessage, 0x00000000, false, false);
         }
 
         // Try with EIP-191 prefixed hash
