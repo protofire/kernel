@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import "openzeppelin-contracts/contracts/utils/Strings.sol";
 import {SignerBase} from "../sdk/moduleBase/SignerBase.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
 import {PackedUserOperation} from "../interfaces/PackedUserOperation.sol";
@@ -47,14 +48,6 @@ contract SafeSigner is SignerBase {
         bool success,
         bool isValid
     );
-    event DebugEthHashValidation(
-        address indexed parentSafe,
-        bytes32 indexed originalHash,
-        bytes32 indexed ethHash,
-        bytes4 magicValue,
-        bool success,
-        bool isValid
-    );
     event DebugFunctionReturn(
         bytes32 indexed id,
         address indexed kernel,
@@ -76,7 +69,7 @@ contract SafeSigner is SignerBase {
         return usedIds[wallet] > 0;
     }
 
-    function utf8ToHexFromBytes32(bytes32 input) public pure returns (string memory) {
+    function utf8ToHexFromBytes32(bytes32 input) public pure returns (bytes memory) {
         bytes memory hexChars = "0123456789abcdef";
         bytes memory result = new bytes(64); // 32 bytes * 2 hex chars
         uint length = 0;
@@ -93,35 +86,40 @@ contract SafeSigner is SignerBase {
         bytes memory trimmedResult = new bytes(length + 2);
         trimmedResult[0] = "0";
         trimmedResult[1] = "x";
-        for (uint i = 0; i < length; i++) {
+        for (uint i; i < length; i++) {
             trimmedResult[i + 2] = result[i];
         }
 
-        return string(trimmedResult);
+        return trimmedResult;
     }
 
+    // should be pure, but debugging requires it temporary throw events
     function hashMessage(bytes32 message) public returns (bytes32) {
-        uint256 messageLength = 66;
+        bytes memory messageHex = utf8ToHexFromBytes32(message);
+
+        uint256 messageLength = messageHex.length;
 
         bytes memory prefix = abi.encodePacked(
             "\x19Ethereum Signed Message:\n",
-            "66"
+            Strings.toString(messageLength)
         );
 
         bytes memory concatenated = abi.encodePacked(
             prefix,
-            utf8ToHexFromBytes32(message)
+            messageHex
         );
+
+        bytes32 hashedMessage = keccak256(concatenated);
 
         emit DebugHashMessage(
             message,
             prefix,
             concatenated,
             messageLength,
-            keccak256(concatenated)
+            hashedMessage
         );
 
-        return keccak256(concatenated);
+        return hashedMessage;
     }
 
     function checkUserOpSignature(bytes32 id, PackedUserOperation calldata userOp, bytes32 userOpHash)
@@ -181,27 +179,10 @@ contract SafeSigner is SignerBase {
             emit DebugOriginalHashValidation(parentSafe, hashedMessage, 0x00000000, false, false);
         }
 
-        // Try with EIP-191 prefixed hash
-        bytes32 ethHash = ECDSA.toEthSignedMessageHash(userOpHash);
-        
-        try IERC1271(parentSafe).isValidSignature(ethHash, cleanSig) returns (bytes4 magicValue) {
-            bool isValid = (magicValue == ERC1271_MAGICVALUE);
-            emit DebugEthHashValidation(parentSafe, userOpHash, ethHash, magicValue, true, isValid);
-            
-            if (isValid) {
-                emit DebugFunctionReturn(id, msg.sender, SIG_VALIDATION_SUCCESS_UINT, "EthHashValid");
-                return SIG_VALIDATION_SUCCESS_UINT;
-            }
-        } catch {
-            // Log failed ETH hash validation
-            emit DebugEthHashValidation(parentSafe, userOpHash, ethHash, 0x00000000, false, false);
-        }
-
         // Debug: Log final return value - keeping as SUCCESS for debugging purposes
-        emit DebugFunctionReturn(id, msg.sender, SIG_VALIDATION_SUCCESS_UINT, "BothValidationsFailed");
+        emit DebugFunctionReturn(id, msg.sender, SIG_VALIDATION_FAILED_UINT, "BothValidationsFailed");
         
-        return SIG_VALIDATION_SUCCESS_UINT;
-        //return SIG_VALIDATION_FAILED_UINT;
+        return SIG_VALIDATION_FAILED_UINT;
     }
 
     function checkSignature(bytes32 id, address, bytes32 hash, bytes calldata sig)
